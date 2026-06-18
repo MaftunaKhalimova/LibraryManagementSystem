@@ -45,6 +45,15 @@ def delete_book(book_id):
     """Deletes a book from the database by its ID."""
     with get_connection() as conn:
         cursor = conn.cursor()
+        cursor.execute("SELECT title, status FROM books WHERE book_id = ?", (book_id,))
+        book = cursor.fetchone()
+        if not book:
+            print(f"❌ Error: Book ID {book_id} does not exist.")
+            return False
+        if book['status'] == 'Borrowed':
+            print(f"❌ Error: '{book['title']}' is currently borrowed and cannot be removed.")
+            return False
         cursor.execute("DELETE FROM books WHERE book_id = ?", (book_id,))
         conn.commit()
         print(f"🗑️ Book ID {book_id} removed from system.")
+        return True
