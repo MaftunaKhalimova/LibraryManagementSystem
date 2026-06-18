@@ -50,4 +50,3 @@ def initialize_db():
         ''')
         
         conn.commit()
-    print("Database initialized successfully.")

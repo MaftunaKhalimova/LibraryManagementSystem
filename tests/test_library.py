@@ -9,7 +9,7 @@ sys.stdout.reconfigure(encoding='utf-8', line_buffering=True)
 
 from src.books import add_book, get_all_books, search_book_by_title, update_book_status, delete_book
 from src.members import add_member, get_all_members, search_member_by_name, delete_member
-from src.borrowing import borrow_book, return_book
+from src.borrowing import borrow_book, return_book, list_active_borrows
 from src.database import initialize_db
 
 
@@ -54,7 +54,6 @@ class TestInitializeDb(unittest.TestCase):
         """initialize_db should create all three tables without raising."""
         with patch('src.database.get_connection') as mock_get_conn:
             mock_get_conn.return_value = make_test_db()
-            # Should not raise
             initialize_db()
 
 
@@ -109,8 +108,7 @@ class TestBooks(unittest.TestCase):
 
     def test_search_exact_title_match(self):
         add_book('Python Programming', 'Author', 'ISBN-PY')
-        results = search_book_by_title('Python Programming')
-        self.assertEqual(len(results), 1)
+        self.assertEqual(len(search_book_by_title('Python Programming')), 1)
 
     def test_search_partial_title_match(self):
         add_book('Python Programming', 'Author', 'ISBN-PY1')
@@ -234,14 +232,40 @@ class TestMembers(unittest.TestCase):
     def test_delete_member_removes_record(self):
         add_member('Alice', 'alice@example.com')
         member_id = get_all_members()[0]['member_id']
-        delete_member(member_id)
+        self.assertTrue(delete_member(member_id))
         self.assertEqual(get_all_members(), [])
 
-    def test_delete_nonexistent_member_does_not_raise(self):
-        try:
-            delete_member(9999)
-        except Exception as e:
-            self.fail(f"delete_member raised an exception: {e}")
+    def test_delete_nonexistent_member_returns_false(self):
+        self.assertFalse(delete_member(9999))
+
+    def test_delete_member_with_active_borrow_returns_false(self):
+        add_member('Alice', 'alice@example.com')
+        member_id = get_all_members()[0]['member_id']
+        self.conn.execute(
+            "INSERT INTO borrowing_records (book_id, member_id) VALUES (1, ?)", (member_id,)
+        )
+        self.conn.commit()
+        self.assertFalse(delete_member(member_id))
+
+    def test_delete_member_with_active_borrow_keeps_record(self):
+        add_member('Alice', 'alice@example.com')
+        member_id = get_all_members()[0]['member_id']
+        self.conn.execute(
+            "INSERT INTO borrowing_records (book_id, member_id) VALUES (1, ?)", (member_id,)
+        )
+        self.conn.commit()
+        delete_member(member_id)
+        self.assertEqual(len(get_all_members()), 1)
+
+    def test_delete_member_allowed_after_all_books_returned(self):
+        add_member('Alice', 'alice@example.com')
+        member_id = get_all_members()[0]['member_id']
+        self.conn.execute(
+            "INSERT INTO borrowing_records (book_id, member_id, return_date) VALUES (1, ?, CURRENT_DATE)",
+            (member_id,)
+        )
+        self.conn.commit()
+        self.assertTrue(delete_member(member_id))
 
 
 # ---------------------------------------------------------------------------
@@ -252,8 +276,8 @@ class TestBorrowing(unittest.TestCase):
 
     def setUp(self):
         self.conn = make_test_db()
-        self.p_books     = patch('src.books.get_connection',    return_value=self.conn)
-        self.p_members   = patch('src.members.get_connection',  return_value=self.conn)
+        self.p_books     = patch('src.books.get_connection',     return_value=self.conn)
+        self.p_members   = patch('src.members.get_connection',   return_value=self.conn)
         self.p_borrowing = patch('src.borrowing.get_connection', return_value=self.conn)
         self.p_books.start()
         self.p_members.start()
@@ -279,6 +303,15 @@ class TestBorrowing(unittest.TestCase):
         borrow_book(self.book_id, self.member_id)
         self.assertEqual(get_all_books()[0]['status'], 'Borrowed')
 
+    def test_borrow_book_creates_record(self):
+        borrow_book(self.book_id, self.member_id)
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT COUNT(*) AS cnt FROM borrowing_records WHERE book_id = ? AND return_date IS NULL",
+            (self.book_id,)
+        )
+        self.assertEqual(cursor.fetchone()['cnt'], 1)
+
     def test_borrow_nonexistent_book_returns_false(self):
         self.assertFalse(borrow_book(9999, self.member_id))
 
@@ -289,12 +322,15 @@ class TestBorrowing(unittest.TestCase):
         borrow_book(self.book_id, self.member_id)
         self.assertFalse(borrow_book(self.book_id, self.member_id))
 
-    def test_borrow_already_borrowed_book_does_not_create_extra_record(self):
+    def test_borrow_already_borrowed_does_not_create_extra_record(self):
         borrow_book(self.book_id, self.member_id)
         borrow_book(self.book_id, self.member_id)
         cursor = self.conn.cursor()
-        cursor.execute('SELECT COUNT(*) FROM borrowing_records WHERE book_id = ?', (self.book_id,))
-        self.assertEqual(cursor.fetchone()[0], 1)
+        cursor.execute(
+            "SELECT COUNT(*) AS cnt FROM borrowing_records WHERE book_id = ?",
+            (self.book_id,)
+        )
+        self.assertEqual(cursor.fetchone()['cnt'], 1)
 
     # --- return_book ---
 
@@ -311,9 +347,11 @@ class TestBorrowing(unittest.TestCase):
         borrow_book(self.book_id, self.member_id)
         return_book(self.book_id)
         cursor = self.conn.cursor()
-        cursor.execute('SELECT return_date FROM borrowing_records WHERE book_id = ?', (self.book_id,))
-        row = cursor.fetchone()
-        self.assertIsNotNone(row['return_date'])
+        cursor.execute(
+            "SELECT return_date FROM borrowing_records WHERE book_id = ?",
+            (self.book_id,)
+        )
+        self.assertIsNotNone(cursor.fetchone()['return_date'])
 
     def test_return_book_not_borrowed_returns_false(self):
         self.assertFalse(return_book(self.book_id))
@@ -329,6 +367,31 @@ class TestBorrowing(unittest.TestCase):
         return_book(self.book_id)
         self.assertTrue(borrow_book(self.book_id, self.member_id))
         self.assertEqual(get_all_books()[0]['status'], 'Borrowed')
+
+    # --- list_active_borrows ---
+
+    def test_list_active_borrows_empty_when_none_borrowed(self):
+        self.assertEqual(list_active_borrows(), [])
+
+    def test_list_active_borrows_shows_current_borrow(self):
+        borrow_book(self.book_id, self.member_id)
+        borrows = list_active_borrows()
+        self.assertEqual(len(borrows), 1)
+        self.assertEqual(borrows[0]['book_id'], self.book_id)
+        self.assertEqual(borrows[0]['member_id'], self.member_id)
+
+    def test_list_active_borrows_excludes_returned_books(self):
+        borrow_book(self.book_id, self.member_id)
+        return_book(self.book_id)
+        self.assertEqual(list_active_borrows(), [])
+
+    def test_list_active_borrows_includes_correct_fields(self):
+        borrow_book(self.book_id, self.member_id)
+        br = list_active_borrows()[0]
+        self.assertEqual(br['title'], 'Test Book')
+        self.assertEqual(br['author'], 'Test Author')
+        self.assertEqual(br['member_name'], 'Test Member')
+        self.assertIsNotNone(br['issue_date'])
 
 
 if __name__ == '__main__':
