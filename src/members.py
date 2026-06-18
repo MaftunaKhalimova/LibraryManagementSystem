@@ -32,9 +32,22 @@ def search_member_by_name(name):
         return cursor.fetchall()
 
 def delete_member(member_id):
-    """Removes a member from the database."""
+    """Removes a member from the database if they have no active borrows."""
     with get_connection() as conn:
         cursor = conn.cursor()
+        cursor.execute("SELECT name FROM members WHERE member_id = ?", (member_id,))
+        member = cursor.fetchone()
+        if not member:
+            print(f"❌ Error: Member ID {member_id} does not exist.")
+            return False
+        cursor.execute(
+            "SELECT COUNT(*) AS cnt FROM borrowing_records WHERE member_id = ? AND return_date IS NULL",
+            (member_id,)
+        )
+        if cursor.fetchone()['cnt'] > 0:
+            print(f"❌ Error: '{member['name']}' still has books checked out and cannot be removed.")
+            return False
         cursor.execute("DELETE FROM members WHERE member_id = ?", (member_id,))
         conn.commit()
         print(f"🗑️ Member ID {member_id} removed from system.")
+        return True
